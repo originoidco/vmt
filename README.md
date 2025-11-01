@@ -4,6 +4,8 @@ transcribe and translate discord voice messages
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/LBtckT?referralCode=originoid&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
+if you don't want to self-host, we offer our [own free instance](https://discord.com/oauth2/authorize?client_id=1434011906829455451) you're free to use to add to your servers or as an app.
+
 ## features
 
 - transcribes voice messages using google speech recognition
