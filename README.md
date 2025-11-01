@@ -33,9 +33,10 @@ before deploying or running locally, you need to configure your discord applicat
 
 ### railway (recommended)
 
-this project is configured to deploy on [Railway](https://railway.com?referralCode=originoid) with 1-click, you also get $20 in credits upon signup by using our link :)
-railway also handles installing ffmpeg automatically.
-you can deploy by clicking the deploy button above and setting your environment variables.
+this project is configured to deploy on [Railway](https://railway.com?referralCode=originoid) in 1-click and automatically handles ffmpeg installation.
+to setup via railway, hit the "deploy on railway" button at the top of this readme
+
+(you'll also get $20 in railway credits upon signup by using our link :3)
 
 ### required environment variables
 
