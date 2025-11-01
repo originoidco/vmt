@@ -1,7 +1,4 @@
 {
-    "token": "discord_token",
-    "prefix": "vmt ",
-    "deepl_api_key": "deepl_api_key",
     "language_codes": {
         "BG": "Bulgarian",
         "CS": "Czech",

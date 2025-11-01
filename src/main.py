@@ -1,24 +1,38 @@
 import discord
 from discord.ext import commands
-import json
 import os
+from dotenv import load_dotenv
 
-with open("config/config.json") as conf_file:
-    config = json.load(conf_file)
-    bot_token = config["token"]
-    bot_prefix = config["prefix"]
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+DEEPL_API_KEY = os.getenv("DEEPL_API_KEY")
+MAX_VOICE_MESSAGE_DURATION = int(os.getenv("MAX_VOICE_MESSAGE_DURATION", "60"))
+
+if not BOT_TOKEN:
+    raise ValueError(
+        "BOT_TOKEN not found in environment variables! Please set it in your .env file"
+    )
+if not DEEPL_API_KEY:
+    raise ValueError(
+        "DEEPL_API_KEY not found in environment variables! Please set it in your .env file"
+    )
 
 
 class Bot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix=bot_prefix, intents=discord.Intents.all())
-        # remove the default help command
-        self.remove_command("help")
+        # intents for the bot
+        intents = discord.Intents.default()
+        intents.message_content = True
+        intents.messages = True
+        intents.guilds = True
+        super().__init__(command_prefix=commands.when_mentioned, intents=intents)
 
     async def setup_hook(self) -> None:
         cogsLoaded = 0
         cogsCount = 0
-        for cog_file in os.listdir("cogs"):
+        cogs_path = os.path.join(os.path.dirname(__file__), "cogs")
+        for cog_file in os.listdir(cogs_path):
             if cog_file.endswith(".py"):
                 cogsCount += 1
                 try:
@@ -29,9 +43,13 @@ class Bot(commands.Bot):
                     print(f"Failed to load cog {cog_file}: {e}")
         print(f"Loaded {cogsLoaded}/{cogsCount} cogs.")
 
+        await self.tree.sync()
+        print("Slash commands synced!")
+
     async def on_ready(self):
-        print("Bot is ready.")
+        print(f"Logged in as {self.user} (ID: {self.user.id})")
+        print("vmt is ready to transcribe and translate voice messages!")
 
 
 bot = Bot()
-bot.run(bot_token)
+bot.run(BOT_TOKEN)

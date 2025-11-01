@@ -1,151 +1,245 @@
 import io
 import json
 import typing
+import os
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 import pydub
 import speech_recognition as sr
 import deepl
-import textwrap
 
 
 class Transcriber(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = self.load_config()
+        self.deepl_api_key = os.getenv("DEEPL_API_KEY")
+        self.max_duration = int(os.getenv("MAX_VOICE_MESSAGE_DURATION", "60"))
+
+        deepl_free_api = os.getenv("DEEPL_FREE_API", "false").lower() == "true"
+        self.deepl_server_url = "https://api-free.deepl.com" if deepl_free_api else None
+
+        self.selected_messages = {}
+
+        self.select_menu = app_commands.ContextMenu(
+            name="Select Voice Message",
+            callback=self.select_voice_message,
+        )
+        self.select_menu.allowed_installs = app_commands.AppInstallationType(
+            guild=True, user=True
+        )
+        self.select_menu.allowed_contexts = app_commands.AppCommandContext(
+            guild=True, dm_channel=True, private_channel=True
+        )
+        self.bot.tree.add_command(self.select_menu)
+
+    async def cog_unload(self):
+        self.bot.tree.remove_command(self.select_menu.name, type=self.select_menu.type)
 
     def load_config(self):
-        with open("config/config.json") as conf_file:
+        config_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "config", "config.json"
+        )
+        with open(config_path) as conf_file:
             return json.load(conf_file)
 
-    # transcribe / translate command
-    @commands.command(aliases=["t", "translate", "tr", "trans"])
+    async def select_voice_message(
+        self, interaction: discord.Interaction, message: discord.Message
+    ):
+        if not message.attachments or not (message.flags.value & (1 << 13)):
+            await interaction.response.send_message(
+                "This message does not contain a voice message.", ephemeral=True
+            )
+            return
+
+        attachment = message.attachments[0]
+        duration = getattr(attachment, "duration_secs", None)
+        if duration and duration > self.max_duration:
+            await interaction.response.send_message(
+                f"Voice message is too long. Maximum duration is {self.max_duration} seconds. This voice message is {int(duration)} seconds.",
+                ephemeral=True,
+            )
+            return
+
+        self.selected_messages[interaction.user.id] = message
+        await interaction.response.send_message(
+            f"Voice message selected! Use /transcribe to transcribe it.", ephemeral=True
+        )
+
+    async def language_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ):
+        language_codes = self.config["language_codes"]
+
+        popular_languages = [
+            "EN-US",
+            "ES",
+            "FR",
+            "DE",
+            "JA",
+            "ZH",
+            "PT-BR",
+            "RU",
+            "IT",
+            "NL",
+        ]
+
+        if not current:
+            choices = [
+                app_commands.Choice(name=f"{code} - {language_codes[code]}", value=code)
+                for code in popular_languages
+                if code in language_codes
+            ]
+            return choices[:25]
+
+        current_upper = current.upper()
+        current_lower = current.lower()
+
+        exact_matches = []
+        code_matches = []
+        name_matches = []
+
+        for code, name in language_codes.items():
+            if code == current_upper:
+                exact_matches.append((code, name))
+            elif code.startswith(current_upper):
+                code_matches.append((code, name))
+            elif current_lower in name.lower():
+                name_matches.append((code, name))
+
+        all_matches = exact_matches + code_matches + name_matches
+        choices = [
+            app_commands.Choice(name=f"{code} - {name}", value=code)
+            for code, name in all_matches
+        ]
+
+        return choices[:25]
+
+    @app_commands.command(
+        name="transcribe", description="Transcribe the selected voice message"
+    )
+    @app_commands.describe(
+        translate_to="Language code to translate to (e.g., EN-US, ES, FR)",
+        public="Should everyone see this response? (default: false)",
+    )
+    @app_commands.autocomplete(translate_to=language_autocomplete)
+    @app_commands.allowed_installs(guilds=True, users=True)
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     async def transcribe(
-        self, ctx, *, translate_to=None
-    ):  # takes an optional argument, translate_to, which is the language code to translate the transcribed text to.
-        # check if translate_to was passed
+        self,
+        interaction: discord.Interaction,
+        translate_to: str = None,
+        public: bool = False,
+    ):
+        if interaction.user.id not in self.selected_messages:
+            await interaction.response.send_message(
+                "No voice message selected! Right-click a message and select 'Select Voice Message' first.",
+                ephemeral=True,
+            )
+            return
+
+        message = self.selected_messages[interaction.user.id]
+        await self._transcribe_message(interaction, message, translate_to, public)
+
+    async def _transcribe_message(
+        self,
+        interaction: discord.Interaction,
+        message: discord.Message,
+        translate_to: str = None,
+        public: bool = False,
+    ):
+        await interaction.response.defer(ephemeral=not public)
+
         if translate_to is not None:
             translate_to = translate_to.upper()
             language_codes = self.config["language_codes"]
             if translate_to not in language_codes:
                 valid_codes = ", ".join([f"`{code}`" for code in language_codes])
-                await ctx.reply(
-                    f"**Invalid language code.**\n> Valid language codes: {valid_codes}"
+                await interaction.followup.send(
+                    f"**Invalid language code.**\n> Valid language codes: {valid_codes}",
+                    ephemeral=True,
                 )
                 return
 
-        # check if there is a replied message
-        replied_message = None
-        if ctx.message.reference:
-            replied_message = await ctx.channel.fetch_message(
-                ctx.message.reference.message_id
-            )
-
-        # if there was no reply attached or if the replied message does not have an attachment, find the most recent message that fits the criteria.
-        if not msg_has_voice_note(replied_message):
-            async for message in ctx.channel.history(limit=None, oldest_first=False):
-                if message.author != ctx.bot.user and msg_has_voice_note(message):
-                    replied_message = message
-                    break
-
-        if not replied_message:
-            await ctx.reply(
-                "You did not reply to a voice message so the bot attempted to find the most recent voice message in the channel. However, no voice message was found."
+        if not msg_has_voice_note(message):
+            await interaction.followup.send(
+                "This message does not contain a voice message.", ephemeral=True
             )
             return
 
-        author = replied_message.author
+        author = message.author
 
-        response = await ctx.reply(f"Transcribing the Voice Message from {author}...")
         try:
-            transcribed_text = await transcribe_msg(replied_message)
-            await response.delete()
+            transcribed_text = await transcribe_msg(message)
+
+            translated_text = None
+            if translate_to is not None and transcribed_text:
+                try:
+                    if self.deepl_server_url:
+                        deepl_translator = deepl.Translator(
+                            auth_key=self.deepl_api_key,
+                            server_url=self.deepl_server_url,
+                        )
+                    else:
+                        deepl_translator = deepl.Translator(auth_key=self.deepl_api_key)
+
+                    result = deepl_translator.translate_text(
+                        transcribed_text, target_lang=translate_to
+                    )
+                    translated_text = (
+                        result.text if hasattr(result, "text") else str(result)
+                    )
+                except Exception as translation_error:
+                    print(f"Translation error: {translation_error}")
+                    translated_text = None
+
+            embed = make_embed(
+                transcribed_text,
+                author,
+                interaction.user,
+                translate_to,
+                translated_text,
+            )
+
+            await interaction.followup.send(embed=embed, ephemeral=not public)
 
         except sr.UnknownValueError as e:
-            await response.edit(
-                content=f"Could not transcribe the Voice Message from {author} as the response was empty."
-            )
-            return
-
-        except Exception as e:
-            await response.edit(
-                content=f"Could not transcribe the Voice Message from {author} due to an error."
-            )
-            print(e)
-            return
-
-        translated_text = None
-        # check if translate_to was passed
-        if (
-            translate_to is not None
-            and transcribed_text
-            and translate_to in self.config["language_codes"]
-        ):
-            # translate the text
-            deepl_translator = deepl.Translator(auth_key=self.config["deepl_api_key"])
-            translated_text = deepl_translator.translate_text(
-                transcribed_text, target_lang=translate_to
-            )
-
-        embed = make_embed(
-            transcribed_text, author, ctx.author, translate_to, translated_text
-        )
-
-        embed_message = await replied_message.reply(embed=embed, mention_author=False)
-
-    @commands.Cog.listener("on_message")
-    async def auto_transcribe(self, msg: discord.Message):
-        if not msg_has_voice_note(msg):
-            return
-
-        await msg.add_reaction("\N{HOURGLASS}")
-        try:
-            transcribed_text = await transcribe_msg(msg)
-            embed = make_embed(transcribed_text, msg.author)
-            await msg.reply(embed=embed)
-
-        except sr.UnknownValueError as e:
-            await msg.reply(
-                content=f"Could not transcribe the Voice Message from {msg.author} as the response was empty."
+            await interaction.followup.send(
+                f"Could not transcribe the Voice Message from {author} as the response was empty.",
+                ephemeral=True,
             )
         except Exception as e:
-            await msg.edit(
-                content=f"Could not transcribe the Voice Message from {msg.author} due to an error."
+            await interaction.followup.send(
+                f"Could not transcribe the Voice Message from {author} due to an error.",
+                ephemeral=True,
             )
             print(e)
-        await msg.remove_reaction("\N{HOURGLASS}", self.bot.user)
 
 
 def make_embed(
     transcribed_text, author, ctx_author=None, translate_to=None, translated_text=None
 ):
     embed = discord.Embed(
-        color=discord.Color.og_blurple(),
-        title=f"🔊 {author.name}'s Voice Message",
+        color=0xACD8AA,
+        title=f"{author.name}'s Voice Message",
     )
     embed.add_field(
         name=f"Transcription",
-        value=textwrap.dedent(
-            f"""
-            ```
-            {transcribed_text}
-            ```
-            [vmt bot](https://github.com/dromzeh/vmt) by [@strazto](https://instagram.com/strazto) & [@dromzeh](https://github.com/dromzeh)
-            """
-        ),
+        value=transcribed_text,
         inline=False,
     )
 
     if translate_to and translated_text:
         embed.add_field(
             name=f"Translation (Into {translate_to.upper()})",
-            value=f"```{translated_text}```",
+            value=str(translated_text),
             inline=False,
         )
 
     if ctx_author:
-        embed.set_footer(text=f"Transcribe requested by {ctx_author}")
+        embed.set_footer(text=f"Requested by {ctx_author.name}")
 
     return embed
 
@@ -164,15 +258,13 @@ async def transcribe_msg(
     if not msg or not msg_has_voice_note(msg):
         return None
 
-    voice_msg_bytes = await msg.attachments[0].read()  # read the voice message as bytes
+    voice_msg_bytes = await msg.attachments[0].read()
     voice_msg = io.BytesIO(voice_msg_bytes)
 
-    # convert the voice message to a .wav file
     audio_segment = pydub.AudioSegment.from_file(voice_msg)
     wav_bytes = io.BytesIO()
     audio_segment.export(wav_bytes, format="wav")
 
-    # transcribe the audio using Google Speech Recognition API
     recognizer = sr.Recognizer()
     with sr.AudioFile(wav_bytes) as source:
         audio_data = recognizer.record(source)

@@ -1,9 +1,0 @@
-
-services:
-  discord-vmt:
-    build:
-      context: "."
-    container_name: discord-vmt
-    restart: unless-stopped
-    volumes:
-      - './src/config:/app/src/config:ro'
